@@ -7,6 +7,8 @@ date-format: short
 fig-align: center
 mainfont: 'Avenir'
 engine: knitr
+execute: 
+  eval: false
 toc: true
 ---
 
@@ -31,19 +33,19 @@ to it in this project repository.
 
 ```{r setup}
 #| eval: false
-
+set.seed(4019)
 library(tidyverse)
+library(data.table)
 # Download TPM data, data dictionary, and annotations
 ## tab-delimited RNA-Seq data file
-df <- data.table::fread(file = "data/GTEx_Analysis_2017-06-05_v8_RNASeQCv1.1.9_gene_tpm.gct")
+df <- data.table::fread(file = "data/GTEx_Analysis_2017-06-05_v8_RNASeQCv1.1.9_gene_tpm.gct",
+                        verbose = TRUE)
 
 ## data dictionary (could also refer to this in Excel, but included here for reproducibility)
 dict <- readxl::read_xlsx("data/GTEx_Analysis_v8_Annotations_SampleAttributesDD.xlsx")
 
 ## annotations (variables/fields are described in data dictionary)
 anno_df <- read_delim("data/GTEx_Analysis_v8_Annotations_SampleAttributesDS.txt")
-anno_df %>% filter(SMAFRZE == "RNASEQ") %>% nrow() # 17382 RNA-Seq samples, close to TPM data file
-
 ```
 
 Once I have those loaded I can confer with the data dictionary and see which variables
@@ -61,10 +63,24 @@ for the first go around. For now, I want to keep:
 
 After selecting these I will only want the RNA-Seq files. There are DNA sequencing
 files because there is also an effort to map expression quantitative trait loci
-(eQTLs) in the GTEx project, but for my purposes that will not be necessary.
+(eQTLs) in the GTEx project, but for my purposes that will not be necessary.  
+
+However, to ensure I am using the highest quality samples (and to save memory for the analysis)
+I need to provide strict filters.
+I will exclude samples with sever autolysis and only include samples with a
+RNA integrity number above 6, which is near the mean.
+That leaves about 11874 samples, variably distributed amongst tissues.
+There are tissue types with low sample numbers such as
+Bladder (11), Cervix Uteri (12), and Fallopian Tube (7).
+I plan on removing these tissue types.
+The next lowest tissue type is Kidney with 43 samples and
+I will randomly take **45 samples** per detailed tissue type
+leaving us with 1400 samples.
+This does mean that the tissues with multiple detailed tissue types recorded
+will have more overall samples per tissue.
 
 
-```{r filter-and-match}
+```{r filter}
 #| eval: false
 
 anno_df <- anno_df %>% select(
@@ -80,22 +96,242 @@ anno_df %>% nrow() # 17382 RNA-Seq samples, close to TPM data file
 anno_df_filtered <- anno_df %>%
   filter(SMATSSCR != 3,
          SMRIN > 6)
+
+anno_df_filtered <- anno_df_filtered %>%
+  filter(!(SMTS %in% c(
+    "Bladder", 
+    "Cervix Uteri",
+    "Fallopian Tube"
+  )) )
+
+# How many samples per batch?
+batch_sampleN <- anno_df_filtered %>% pull(SMNABTCH) %>% table() 
+
+
+# Find distribution of tissues amongt batches
+batch_count <- anno_df_filtered %>%
+  group_by(SMTS, SMNABTCH) %>%
+  count()
+```
+
+```{r plot-tissues_by_batch}
+#| include: false
+
+# Plot for the batches
+# ggplot(batch_count %>%
+#          filter(SMNABTCH %in% names(batch_sampleN[batch_sampleN > 20])),
+#        aes(x = SMTS, y = SMNABTCH)) +
+#   geom_tile(aes(fill = n)) +
+#   labs(title = "Distribution of Tissue Samples by Batch",
+#        subtitle = "(filtered by total batch samples > 20)",
+#        x = "Tissue", y = "Batch") +
+#   scale_fill_gradient(low = "pink", high = "red3", na.value = "grey30",
+#                       guide = guide_colorbar(title.hjust = 0.25,
+#                                              frame.colour = "black",
+#                                              frame.linewidth = 0.5,
+#                                              ticks = FALSE,
+#                                              label.vjust = 1)) +
+#   theme_bw() +
+#   theme(axis.text.y = element_blank(),
+#         axis.ticks = element_blank(),
+#         axis.text.x = element_text(angle = 90, hjust = 1),
+#         plot.title = element_text(hjust = 0.5, face = "bold"),
+#         plot.subtitle = element_text(hjust = 0.5),
+#         panel.border = element_rect(linewidth = 2))
+
+```
+
+
+Another consideration is to limit the number of batch effects.
+Here, I only consider the nucleic acid prep batch effect so
+I first need to understand the concentration of samples per batch by tissue.
+First I plot this for all batches and I found that there is actually a
+point at which the number of samples per batch become scarce.
+This is where I will make the cut-off, paying particular attention to Kidney.
+From these results I decided to filter by total batch samples that are over 20.
+
+
+![Figure 1. Total number of tissue samples by batch](plots/2023-04-16_tissues_per_batch.png)
+
+![Figure 2. Filtered number of tissue samples by batch](plots/2023-04-16_tissues_per_batch_over20.png)
+
+By filtering for the batches with 20 samples or more, I end up with only
+37 samples for Kidney but this shouldn't be a problem because I will
+sample using `sample_slice` which has the behavior of truncating the number of
+rows to sample to the group size if the input `n` exceeds the number of rows in that group.
+
+```{r filter_batch}
+#| eval: false
+
+# Take the batches that processed more than 20 samples at a time
+anno_df_filtered <- anno_df_filtered %>%
+  filter(SMNABTCH %in% names(batch_sampleN[batch_sampleN > 20]) )
+
 # Check the number of tissue samples left
 anno_df_filtered %>%
-  pull(SMTS) %>%
+  pull(SMTSD) %>%
   table()
 
+# Get the filted annotations
+adf_final <- anno_df_filtered %>%
+  group_by(SMTSD) %>%
+  slice_sample(n = 45)
+
+adf_final %>%
+  pull(SMTSD) %>%
+  table()
+
+
+```
+
+
+
+```{r match_samples}
 # Filter the columns of the TPM table
-filtered_sample_id <- anno_df_filtered$SAMPID
+filtered_sample_id <- adf_final$SAMPID
+# Need to use Ensembl ID but also need gene name for reference
+name_mappings <- df %>% select(Name, Description) 
+# write_csv(name_mappings, file = "data/name_mappings.csv")
+
+# Filtering the data frame using Name/Ensembl ID
+df <- df %>%
+  select(Name, all_of(filtered_sample_id)) # Name is unique, Description is not
+
+# Only want protein-coding genes
+human_gtf <- read_csv("data/hsapiens_gtf_extracted.csv")
+human_gtf <- human_gtf %>%
+  filter(gene_biotype == "protein_coding")
 
 df <- df %>%
-  select(Description, all_of(filtered_sample_id))
+  filter(str_extract(Name, pattern = "ENSG[:digit:]+") %in% human_gtf$gene_id)
+df %>% nrow() # Leaves 19173 protein coding genes
+
 ###
 ### NOTE THAT NOW df IS FILTERED ###
 ###
 
 mat_df <- df %>% 
-  column_to_rownames("Description")
+  column_to_rownames("Name") %>%
+  as.matrix()
+
+# Only keep those genes which have average TPM per sample > 1
+# On a log-scale, this is equivalent to > 0
+mat_df <- mat_df[log(rowSums(mat_df)/ncol(mat_df)) > 0, ]
+
+# Save as RDS to more easily open next time
+# saveRDS(mat_df, file = "data/filtered_GTex_Analysis_v8_TPM.rds")
+
+# Read RDS here----
+mat_df <- readRDS("data/filtered_GTex_Analysis_v8_TPM.rds")
+
 ```
 
+Now I have a matrix of 19173 transcripts and 1567 samples.
+The task is now to cluster the genes and samples and display them in a heatmap.
+First I want to describe the layout of the heatmap I am envisioning:  
+
+
+- The genes will be arranged by hierarchical clustering using a euclidean distance metric
+- Samples will be clustered using a Pearson correlation distance metric
+- The columns will be divided in groups by tissue types, but remain unsorted for detailed types
+- The the samples will be clustered from within the tissue type columns
+
+Secondly, the TPM values will be log-transformed for the heatmap to ensure
+that the distribution of values is more normal than without log-transformation.
+This will help with the clustering and some numerical accuracy aspects.
+
+Finally, I will rearrange the dendrograms using the `dendsort` function.
+This allows us to better see the patterns by rearranging the branch order of dendrogram.
+
+```{r heatmap}
+#| eval: false
+#| include: false
+
+# Load necessary packages
+{
+library(ComplexHeatmap)
+library(circlize)
+library(dendsort)
+}
+# Tranform to log scale but need to add small constant to prevent -Inf
+small_c <- 1E-4
+mat_df <- log(mat_df + small_c)
+
+# Will make an annotation heatmap for the tissue type
+mat_adf <- adf_final %>%
+  ungroup() %>%
+  select(SAMPID, SMTS, SMTSD) %>%
+  mutate(SMTS = factor(SMTS),
+         SMTS_int = as.numeric(SMTS),
+         SMTSD = factor(SMTSD),
+         SMTSD_int = as.numeric(SMTSD))
+
+madf1 <- as.character(mat_adf[["SMTS"]])
+names(madf1) <- as.character(mat_adf[["SAMPID"]])
+
+madf1_key <- mat_adf %>%
+  select(SMTS, SMTS_int) %>%
+  distinct()
+
+# Make the heatmap scale
+col_fun <- colorRamp2(c(-4, 0, 4),
+                      c("white", "#4d6bc4", "#ed2724"))
+
+tissue_cols <- structure(sample(viridis::turbo(26), 26), names = as.character(madf1_key[["SMTS"]]))
+
+draw(Legend(col_fun = col_fun,
+            legend_width = unit(2, "in"),
+            border = "black") )
+dev.off()
+
+# Distance and Clustering (this takes a long time!)
+row_clust <- hclust(dist(mat_df)) # dist works on rows
+col_clust <- hclust(as.dist(1 - cor(mat_df))) # cor works on columns
+
+row_dend <- dendsort(row_clust)
+col_dend <- dendsort(col_clust)
+
+
+# To utilize the "split" functionality, I need to transpose these
+ht1 <- Heatmap(t(mat_df),
+               name = "logTPM",
+               col = col_fun,
+               cluster_columns = row_dend, # remember it's transposed
+               cluster_rows = FALSE,
+               show_column_names = FALSE,
+               show_row_names = FALSE,
+               use_raster = TRUE,
+               raster_quality = 2,
+               row_title = NULL,
+               show_parent_dend_line = FALSE,
+               border = "black")
+
+ht2 <- Heatmap(madf1,
+               col = tissue_cols,
+               heatmap_legend_param = list(ncol = 3),
+               cluster_columns = FALSE,
+               cluster_rows = FALSE,
+               name = "Tissue",
+               use_raster = TRUE,
+               show_column_names = FALSE,
+               show_row_names = FALSE,
+               raster_quality = 2,
+               width = unit(0.15, "in"))
+# draw(ht2)
+
+
+ht_list <- ht1 + ht2
+
+png(filename = "plots/2023-04-16__GTEx_TPM_Heatmap.png",
+    width = 10, height = 8, units = "in", res = 150)
+draw(ht_list, row_split = madf1, cluster_rows = FALSE,
+     heatmap_legend_side = "bottom")
+
+dev.off()
+
+```
+
+
+
+![Figure 3. Heatmap of GTEx data](plots/2023-04-16__GTEx_TPM_Heatmap.png)
 
