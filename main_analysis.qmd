@@ -1,0 +1,101 @@
+---
+title: "Finding Tissue-Specific Gene Expression Patterns"
+author: "Gilberto P.M."
+format: html
+date: last-modified
+date-format: short
+fig-align: center
+mainfont: 'Avenir'
+engine: knitr
+toc: true
+---
+
+## Purpose
+The objectives of this project is to take publically-available 
+Genotype-Tissue Expression (GTEx) data and find tissue-specific expression patterns.
+GTEx is a data repository that houses a lot of genomic data from various human tissues.
+I hope to make this scaleable so that it could be tweaked to find expression patterns
+in other large-collection datasets such as this one.
+Downstream of this project, I will use the patterns I find to annotate other 
+comparative analyses I am working on.
+
+## Starting data
+While it would be possible to start from read counts for this analysis,
+I have decided that it might be best to start from scaled data in 
+transcripts per million (TPM) units.
+This was taken from the **GTEx Analysis V8** downloads found here:
+https://gtexportal.org/home/datasets.
+Since this data is relatively freely available, I will not include direct downloads
+to it in this project repository.
+
+
+```{r setup}
+#| eval: false
+
+library(tidyverse)
+# Download TPM data, data dictionary, and annotations
+## tab-delimited RNA-Seq data file
+df <- data.table::fread(file = "data/GTEx_Analysis_2017-06-05_v8_RNASeQCv1.1.9_gene_tpm.gct")
+
+## data dictionary (could also refer to this in Excel, but included here for reproducibility)
+dict <- readxl::read_xlsx("data/GTEx_Analysis_v8_Annotations_SampleAttributesDD.xlsx")
+
+## annotations (variables/fields are described in data dictionary)
+anno_df <- read_delim("data/GTEx_Analysis_v8_Annotations_SampleAttributesDS.txt")
+anno_df %>% filter(SMAFRZE == "RNASEQ") %>% nrow() # 17382 RNA-Seq samples, close to TPM data file
+
+```
+
+Once I have those loaded I can confer with the data dictionary and see which variables
+seem relevant to keep for our analysis. I will be fairly reductive and inclusive
+for the first go around. For now, I want to keep:  
+
+- _SAMPID_: sample ID/GTEx public sample ID
+- _SMATSSCR_: autolysis score [0 = none, 3 = severe]
+- _SMNABTCH_: batch when the nucleic acid was isolated
+- _SMNABTCHT_: type of nucleic acid isolation batch
+- _SMRIN_: RNA Integrity Number (RIN) [1 = completely degraded, 10 = no degradation]
+- _SMTS_: tissue type
+- _SMTSD_: detailed tissue type
+- _SMAFRZE_: samples included in the GTEx Analysis freeze 
+
+After selecting these I will only want the RNA-Seq files. There are DNA sequencing
+files because there is also an effort to map expression quantitative trait loci
+(eQTLs) in the GTEx project, but for my purposes that will not be necessary.
+
+
+```{r filter-and-match}
+#| eval: false
+
+anno_df <- anno_df %>% select(
+  SAMPID, SMTS, SMTSD, SMAFRZE,
+  SMNABTCH, SMNABTCHT,
+  SMATSSCR, SMRIN)
+
+# Only want the high quality RNA samples
+anno_df <- anno_df %>% filter(SMAFRZE == "RNASEQ") 
+anno_df %>% nrow() # 17382 RNA-Seq samples, close to TPM data file
+
+# Secondary filter for high quality RNA samples
+anno_df_filtered <- anno_df %>%
+  filter(SMATSSCR != 3,
+         SMRIN > 6)
+# Check the number of tissue samples left
+anno_df_filtered %>%
+  pull(SMTS) %>%
+  table()
+
+# Filter the columns of the TPM table
+filtered_sample_id <- anno_df_filtered$SAMPID
+
+df <- df %>%
+  select(Description, all_of(filtered_sample_id))
+###
+### NOTE THAT NOW df IS FILTERED ###
+###
+
+mat_df <- df %>% 
+  column_to_rownames("Description")
+```
+
+
