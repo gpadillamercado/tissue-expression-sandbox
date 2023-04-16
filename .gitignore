@@ -2,5 +2,6 @@
 .Rhistory
 .RData
 .Ruserdata
+.Renviron
 tissue-expression-sandbox.Rproj
 data
