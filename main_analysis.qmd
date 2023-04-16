@@ -48,6 +48,8 @@ dict <- readxl::read_xlsx("data/GTEx_Analysis_v8_Annotations_SampleAttributesDD.
 anno_df <- read_delim("data/GTEx_Analysis_v8_Annotations_SampleAttributesDS.txt")
 ```
 
+## Filtering
+
 Once I have those loaded I can confer with the data dictionary and see which variables
 seem relevant to keep for our analysis. I will be fairly reductive and inclusive
 for the first go around. For now, I want to keep:  
@@ -113,6 +115,8 @@ batch_count <- anno_df_filtered %>%
   group_by(SMTS, SMNABTCH) %>%
   count()
 ```
+
+## Plotting
 
 ```{r plot-tissues_by_batch}
 #| include: false
