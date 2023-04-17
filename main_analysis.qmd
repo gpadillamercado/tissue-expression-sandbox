@@ -226,6 +226,8 @@ mat_adf <- adf_final %>%
 filtered_sample_id <- mat_adf[["SAMPID"]]
 sum(is.na(filtered_sample_id %in% colnames(df))) # NA check passed
 
+
+
 # Need to use Ensembl ID but also need gene name for reference
 name_mappings <- df %>% select(Name, Description) 
 # write_csv(name_mappings, file = "data/name_mappings.csv")
@@ -350,7 +352,7 @@ ht1 <- Heatmap(mat_df,
                col = col_fun,
                cluster_columns = gene_dend, # remember it's transposed
                cluster_rows = FALSE,
-               row_order = names(madf1),
+               # row_order = names(madf1),
                show_column_names = FALSE,
                show_row_names = FALSE,
                use_raster = TRUE,
@@ -378,15 +380,17 @@ ht2 <- Heatmap(madf1,
 ht_list <- ht2 + ht1
 
 
-png(filename = "plots/2023-04-16__GTEx_TPM_Heatmap_nosplit.png",
+png(filename = "plots/2023-04-16__GTEx_TPM_Heatmap.png",
     width = 10, height = 8, units = "in", res = 150)
 
 draw(ht_list,
-     # row_split = madf1,
+     row_split = factor(madf1,
+                        levels = tissue_order),
      cluster_rows = FALSE,
      heatmap_legend_side = "bottom")
 
 dev.off()
+
 ```
 
 
