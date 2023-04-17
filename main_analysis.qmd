@@ -35,8 +35,9 @@ to it in this project repository.
 #| eval: false
 set.seed(4019)
 library(tidyverse)
-library(data.table)
+
 # Download TPM data, data dictionary, and annotations
+
 ## tab-delimited RNA-Seq data file
 df <- data.table::fread(file = "data/GTEx_Analysis_2017-06-05_v8_RNASeQCv1.1.9_gene_tpm.gct",
                         verbose = TRUE)
@@ -85,6 +86,10 @@ will have more overall samples per tissue.
 ```{r filter}
 #| eval: false
 
+# NA check, do the sample IDs in both data and annotation files
+sum(is.na(anno_df$SAMPID %in% colnames(df)))
+
+# Keep metrics of interest
 anno_df <- anno_df %>% select(
   SAMPID, SMTS, SMTSD, SMAFRZE,
   SMNABTCH, SMNABTCHT,
@@ -171,19 +176,25 @@ rows to sample to the group size if the input `n` exceeds the number of rows in 
 anno_df_filtered <- anno_df_filtered %>%
   filter(SMNABTCH %in% names(batch_sampleN[batch_sampleN > 20]) )
 
+# NA check
+sum(is.na(anno_df_filtered$SAMPID %in% colnames(df))) # Passed
+
 # Check the number of tissue samples left
-anno_df_filtered %>%
-  pull(SMTSD) %>%
-  table()
+# anno_df_filtered %>%
+#   pull(SMTSD) %>%
+#   table()
 
 # Get the filted annotations
 adf_final <- anno_df_filtered %>%
   group_by(SMTSD) %>%
-  slice_sample(n = 45)
+  slice_sample(n = 45) %>%
+  ungroup()
 
-adf_final %>%
-  pull(SMTSD) %>%
-  table()
+sum(is.na(adf_final$SAMPID %in% colnames(df))) # NA check passed
+
+# adf_final %>%
+#   pull(SMTSD) %>%
+#   table()
 
 
 ```
@@ -191,8 +202,30 @@ adf_final %>%
 
 
 ```{r match_samples}
+# Order of tissues, here it is roughly split by germ layer
+tissue_order <- c(
+  "Skin", "Breast", "Nerve", "Brain",
+  "Pituitary", "Adrenal Gland",
+  "Thyroid", "Adipose Tissue", "Blood Vessel", "Heart", "Muscle",
+  "Kidney", "Spleen",
+  "Lung", "Salivary Gland", "Esophagus", "Stomach", "Small Intestine",
+  "Colon", "Liver", "Pancreas", "Prostate",
+  "Vagina", "Uterus", "Ovary", "Testis"
+)
+
+# This is arranged to set the orders
+mat_adf <- adf_final %>%
+  select(SAMPID, SMTS, SMTSD) %>%
+  mutate(SMTS = factor(SMTS,
+                       levels = tissue_order),
+         SMTS_int = as.numeric(SMTS)) %>%
+  arrange(SMTS_int)
+
+
 # Filter the columns of the TPM table
-filtered_sample_id <- adf_final$SAMPID
+filtered_sample_id <- mat_adf[["SAMPID"]]
+sum(is.na(filtered_sample_id %in% colnames(df))) # NA check passed
+
 # Need to use Ensembl ID but also need gene name for reference
 name_mappings <- df %>% select(Name, Description) 
 # write_csv(name_mappings, file = "data/name_mappings.csv")
@@ -200,6 +233,8 @@ name_mappings <- df %>% select(Name, Description)
 # Filtering the data frame using Name/Ensembl ID
 df <- df %>%
   select(Name, all_of(filtered_sample_id)) # Name is unique, Description is not
+sum(is.na(filtered_sample_id %in% colnames(df)))
+sum(is.na(colnames(df) %in% filtered_sample_id))
 
 # Only want protein-coding genes
 human_gtf <- read_csv("data/hsapiens_gtf_extracted.csv")
@@ -209,7 +244,7 @@ human_gtf <- human_gtf %>%
 df <- df %>%
   filter(str_extract(Name, pattern = "ENSG[:digit:]+") %in% human_gtf$gene_id)
 df %>% nrow() # Leaves 19173 protein coding genes
-
+sum(is.na(colnames(df) %in% filtered_sample_id)) # NA check passed
 ###
 ### NOTE THAT NOW df IS FILTERED ###
 ###
@@ -221,6 +256,8 @@ mat_df <- df %>%
 # Only keep those genes which have average TPM per sample > 1
 # On a log-scale, this is equivalent to > 0
 mat_df <- mat_df[log(rowSums(mat_df)/ncol(mat_df)) > 0, ]
+dim(mat_df) # 16162 genes, 1567 samples
+sum(is.na(colnames(mat_df) == filtered_sample_id)) # Passed strict NA check (well-ordered)
 
 # Save as RDS to more easily open next time
 # saveRDS(mat_df, file = "data/filtered_GTex_Analysis_v8_TPM.rds")
@@ -257,19 +294,11 @@ library(ComplexHeatmap)
 library(circlize)
 library(dendsort)
 }
-# Tranform to log scale but need to add small constant to prevent -Inf
+# Transform to log scale but need to add small constant to prevent -Inf
 small_c <- 1E-4
 mat_df <- log(mat_df + small_c)
 
 # Will make an annotation heatmap for the tissue type
-mat_adf <- adf_final %>%
-  ungroup() %>%
-  select(SAMPID, SMTS, SMTSD) %>%
-  mutate(SMTS = factor(SMTS),
-         SMTS_int = as.numeric(SMTS),
-         SMTSD = factor(SMTSD),
-         SMTSD_int = as.numeric(SMTSD))
-
 madf1 <- as.character(mat_adf[["SMTS"]])
 names(madf1) <- as.character(mat_adf[["SAMPID"]])
 
@@ -279,29 +308,49 @@ madf1_key <- mat_adf %>%
 
 # Make the heatmap scale
 col_fun <- colorRamp2(c(-4, 0, 4),
-                      c("white", "#4d6bc4", "#ed2724"))
+                      viridis::plasma(3))
 
-tissue_cols <- structure(sample(viridis::turbo(26), 26), names = as.character(madf1_key[["SMTS"]]))
+seq_by4 <- c(seq(1, 26, by = 4),
+             seq(3, 26, by = 4),
+             seq(2, 26, by = 4),
+             seq(4, 26, by = 4))
+
+tissue_cols <- structure(viridis::turbo(26)[seq_by4],
+                         names = as.character(madf1_key[["SMTS"]]))
 
 draw(Legend(col_fun = col_fun,
             legend_width = unit(2, "in"),
             border = "black") )
 dev.off()
 
-# Distance and Clustering (this takes a long time!)
-row_clust <- hclust(dist(mat_df)) # dist works on rows
-col_clust <- hclust(as.dist(1 - cor(mat_df))) # cor works on columns
 
-row_dend <- dendsort(row_clust)
-col_dend <- dendsort(col_clust)
+draw(Legend(labels = names(tissue_cols),
+            at = tissue_order,
+            legend_gp = gpar(fill = tissue_cols),
+            legend_width = unit(2, "in"),
+            border = "black") )
+dev.off()
 
 
-# To utilize the "split" functionality, I need to transpose these
-ht1 <- Heatmap(t(mat_df),
+# To utilize the "split" functionality, I need to transpose the matrix
+mat_df <- t(mat_df)
+sum(is.na(rownames(mat_df) == names(madf1))) # Strict NA test passed!
+
+# Distance and Clustering (this takes about 20min total!)
+gene_clust <- fastcluster::hclust(dist(t(mat_df))) # dist works on rows
+# sample_clust <- hclust(as.dist(1 - cor(mat_df))) # cor works on columns
+
+gene_dend <- dendsort(gene_clust)
+# sample_dend <- dendsort(sample_clust)
+
+# Creating Heatmap List
+sum(is.na(rownames(mat_df) == names(madf1))) # Strict NA test passed!
+ht1 <- Heatmap(mat_df,
                name = "logTPM",
                col = col_fun,
-               cluster_columns = row_dend, # remember it's transposed
+               cluster_columns = gene_dend, # remember it's transposed
                cluster_rows = FALSE,
+               row_order = names(madf1),
                show_column_names = FALSE,
                show_row_names = FALSE,
                use_raster = TRUE,
@@ -312,6 +361,7 @@ ht1 <- Heatmap(t(mat_df),
 
 ht2 <- Heatmap(madf1,
                col = tissue_cols,
+               row_title = NULL,
                heatmap_legend_param = list(ncol = 3),
                cluster_columns = FALSE,
                cluster_rows = FALSE,
@@ -321,18 +371,22 @@ ht2 <- Heatmap(madf1,
                show_row_names = FALSE,
                raster_quality = 2,
                width = unit(0.15, "in"))
-# draw(ht2)
+ draw(ht2)
+ dev.off()
+
+# List of heatmaps to combine
+ht_list <- ht2 + ht1
 
 
-ht_list <- ht1 + ht2
-
-png(filename = "plots/2023-04-16__GTEx_TPM_Heatmap.png",
+png(filename = "plots/2023-04-16__GTEx_TPM_Heatmap_nosplit.png",
     width = 10, height = 8, units = "in", res = 150)
-draw(ht_list, row_split = madf1, cluster_rows = FALSE,
+
+draw(ht_list,
+     # row_split = madf1,
+     cluster_rows = FALSE,
      heatmap_legend_side = "bottom")
 
 dev.off()
-
 ```
 
 
